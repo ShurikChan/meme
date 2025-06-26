@@ -11,9 +11,12 @@ WS_URI = "wss://pumpportal.fun/api/data"
 tracked_tokens = set()
 last_ping = time.time()
 
-os.makedirs("trades", exist_ok=True)
+os.makedirs("meme_ml/trades", exist_ok=True)
 
-# Состояние по каждому токену
+# mint -> creator_wallet
+mint_to_creator = {}
+
+# состояние токена
 token_states = {}
 
 def init_token_state(mint):
@@ -23,7 +26,8 @@ def init_token_state(mint):
         "wallet_tx_count": defaultdict(int),
         "tx_number": 0,
         "volume_cum_sol": 0.0,
-        "volume_cum_tokens": 0.0
+        "volume_cum_tokens": 0.0,
+        "creator_sell_tokens": 0.0
     }
 
 async def save_trade(trade):
@@ -37,17 +41,14 @@ async def save_trade(trade):
     price = sol / tokens if tokens > 0 else 0
     wallet = trade.get("traderPublicKey", "")
 
-    # Инициализируем состояние токена
     if mint not in token_states:
         init_token_state(mint)
 
     state = token_states[mint]
 
-    # Установка времени первой сделки
     if state["first_ts"] is None:
         state["first_ts"] = timestamp
 
-    # Обновляем счётчики
     state["tx_number"] += 1
     state["wallet_tx_count"][wallet] += 1
     is_repeat = wallet in state["wallets_seen"]
@@ -56,7 +57,15 @@ async def save_trade(trade):
     state["volume_cum_tokens"] += tokens
     is_first_minute = (timestamp - state["first_ts"]).total_seconds() <= 60
 
-    # Запись
+    is_creator = (mint_to_creator.get(mint) == wallet)
+    if is_creator and trade.get("txType") == "sell":
+        state["creator_sell_tokens"] += tokens
+
+    creator_sold_all = (
+        state["creator_sell_tokens"] > 0.9 * state["volume_cum_tokens"]
+        if state["volume_cum_tokens"] > 0 else False
+    )
+
     filename = f"meme_ml/trades/{mint}.csv"
     file_exists = os.path.isfile(filename)
 
@@ -64,7 +73,8 @@ async def save_trade(trade):
         writer = csv.DictWriter(f, fieldnames=[
             "timestamp", "mint", "txType", "solAmount", "tokenAmount", "price_per_token",
             "traderPublicKey", "is_repeat_buyer", "tx_count_by_wallet", "tx_number",
-            "volume_cum_sol", "volume_cum_tokens", "is_first_minute"
+            "volume_cum_sol", "volume_cum_tokens", "is_first_minute", "is_creator",
+            "creator_sold_all"
         ])
         if not file_exists:
             writer.writeheader()
@@ -82,7 +92,9 @@ async def save_trade(trade):
             "tx_number": state["tx_number"],
             "volume_cum_sol": state["volume_cum_sol"],
             "volume_cum_tokens": state["volume_cum_tokens"],
-            "is_first_minute": int(is_first_minute)
+            "is_first_minute": int(is_first_minute),
+            "is_creator": int(is_creator),
+            "creator_sold_all": int(creator_sold_all)
         })
 
 async def subscribe_token_trades(ws, mint_address):
@@ -122,6 +134,9 @@ async def subscribe_loop():
                         # Новый токен
                         if "mint" in data and data.get("txType") == "create":
                             mint_clean = data["mint"].replace("pump", "")
+                            creator = data.get("traderPublicKey")
+                            if creator:
+                                mint_to_creator[mint_clean] = creator
                             print(f"[NEW TOKEN] {data.get('name')} ({mint_clean})")
                             await subscribe_token_trades(ws, mint_clean)
 
